@@ -10,246 +10,309 @@ from telegram.ext import (
 
 import database as db
 import keyboards as kb
-from config import ADMIN_IDS, ORDER_STATUSES
+from config import ORDER_STATUSES, ADMIN_IDS
 
-# مراحل مکالمه افزودن محصول
-ADD_CAT_NAME, ADD_PROD_CAT, ADD_PROD_NAME, ADD_PROD_UNIT, ADD_PROD_PRICE = range(5)
-# مراحل تغییر قیمت
-EDIT_PRICE_PICK, EDIT_PRICE_VALUE = range(5, 7)
+# مراحل مکالمه
+ASK_QTY_CUSTOM, ASK_ADDRESS, ASK_PHONE, CONFIRM = range(4)
 
 
-def is_admin(user_id):
-    return user_id in ADMIN_IDS
-
-
-async def admin_only_guard(update: Update):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔ این بخش فقط برای ادمین‌هاست.")
-        return False
-    return True
-
-
-async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await admin_only_guard(update):
-        return
-    await update.message.reply_text("پنل مدیریت:", reply_markup=kb.admin_menu_keyboard())
-
-
-async def back_to_user_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("بازگشت به منوی اصلی.", reply_markup=kb.main_menu_keyboard())
-
-
-# ---------- افزودن محصول ----------
-
-async def add_product_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await admin_only_guard(update):
-        return ConversationHandler.END
-    cats = db.list_categories()
-    if cats:
-        lines = "\n".join(f"- {c['name']}" for c in cats)
-        await update.message.reply_text(
-            f"دسته‌بندی‌های موجود:\n{lines}\n\n"
-            "نام دسته‌بندی محصول جدید رو بفرستید (اگه جدیده، خودکار ساخته می‌شه):"
-        )
-    else:
-        await update.message.reply_text("نام دسته‌بندی محصول رو بفرستید (مثلاً: میلگرد):")
-    return ADD_CAT_NAME
-
-
-async def add_product_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cat_name = update.message.text.strip()
-    cat_id = db.add_category(cat_name)
-    if cat_id is None:
-        cats = {c["name"]: c["id"] for c in db.list_categories()}
-        cat_id = cats.get(cat_name)
-    context.user_data["new_prod_cat_id"] = cat_id
-    await update.message.reply_text("نام محصول رو بفرستید (مثلاً: میلگرد ۱۴ آجدار):")
-    return ADD_PROD_NAME
-
-
-async def add_product_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["new_prod_name"] = update.message.text.strip()
-    await update.message.reply_text("واحد اندازه‌گیری چیه؟ (مثلاً: کیلوگرم، تن، شاخه)")
-    return ADD_PROD_UNIT
-
-
-async def add_product_unit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["new_prod_unit"] = update.message.text.strip()
-    await update.message.reply_text("قیمت به تومان رو به عدد بفرستید (مثلاً: 285000):")
-    return ADD_PROD_PRICE
-
-
-async def add_product_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip().replace(",", "")
-    if not text.isdigit():
-        await update.message.reply_text("لطفاً فقط عدد بفرستید.")
-        return ADD_PROD_PRICE
-    price = int(text)
-    cat_id = context.user_data["new_prod_cat_id"]
-    name = context.user_data["new_prod_name"]
-    unit = context.user_data["new_prod_unit"]
-    product_id = db.add_product(cat_id, name, unit, price)
-    await update.message.reply_text(
-        f"✅ محصول «{name}» با قیمت {price:,} تومان / {unit} اضافه شد. (کد: {product_id})",
-        reply_markup=kb.admin_menu_keyboard(),
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    db.upsert_user(user.id, user.full_name, user.username)
+    text = (
+        f"سلام {user.first_name} 👋\n\n"
+        "به ربات فروش آهن‌آلات خوش اومدید.\n"
+        "از منوی زیر می‌تونید سفارش ثبت کنید، قیمت‌ها رو ببینید یا وضعیت سفارش‌های قبلیتون رو چک کنید."
     )
+    await update.message.reply_text(text, reply_markup=kb.main_menu_keyboard())
     return ConversationHandler.END
 
 
-# ---------- تغییر قیمت ----------
-
-async def edit_price_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await admin_only_guard(update):
-        return ConversationHandler.END
+async def show_prices(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cats = db.list_categories()
     if not cats:
-        await update.message.reply_text("هنوز محصولی ثبت نشده.")
-        return ConversationHandler.END
+        await update.message.reply_text("در حال حاضر محصولی ثبت نشده. بعداً دوباره سر بزنید.")
+        return
     await update.message.reply_text(
-        "یک دسته‌بندی انتخاب کنید:", reply_markup=kb.categories_keyboard(prefix="editcat")
+        "یک دسته‌بندی رو انتخاب کنید تا قیمت‌های به‌روز رو ببینید:",
+        reply_markup=kb.categories_keyboard(prefix="pricecat"),
     )
-    return ConversationHandler.END
 
 
-async def edit_price_pick_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def show_prices_for_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    if not is_admin(query.from_user.id):
-        await query.edit_message_text("⛔ فقط برای ادمین.")
-        return
     cat_id = int(query.data.split(":")[1])
-    products = db.list_products(category_id=cat_id, active_only=False)
+    products = db.list_products(category_id=cat_id)
     if not products:
-        await query.edit_message_text("محصولی در این دسته نیست.")
+        await query.edit_message_text("محصولی در این دسته موجود نیست.")
         return
-    await query.edit_message_text(
-        "محصول مورد نظر برای تغییر قیمت رو انتخاب کنید:",
-        reply_markup=kb.products_keyboard(cat_id, prefix="editprod"),
-    )
+    lines = ["💰 قیمت‌های به‌روز:\n"]
+    for p in products:
+        lines.append(f"• {p['name']}: {p['price']:,} تومان / {p['unit']}")
+    await query.edit_message_text("\n".join(lines))
 
 
-async def edit_price_pick_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    if not is_admin(query.from_user.id):
-        await query.edit_message_text("⛔ فقط برای ادمین.")
+async def new_order_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["cart"] = context.user_data.get("cart", [])
+    cats = db.list_categories()
+    if not cats:
+        await update.message.reply_text("در حال حاضر محصولی برای سفارش ثبت نشده.")
         return ConversationHandler.END
-    product_id = int(query.data.split(":")[1])
-    context.user_data["editing_product_id"] = product_id
-    product = db.get_product(product_id)
-    await query.edit_message_text(
-        f"قیمت فعلی «{product['name']}»: {product['price']:,} تومان / {product['unit']}\n\n"
-        "قیمت جدید رو به عدد بفرستید:"
-    )
-    return EDIT_PRICE_VALUE
-
-
-async def edit_price_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip().replace(",", "")
-    if not text.isdigit():
-        await update.message.reply_text("لطفاً فقط عدد بفرستید.")
-        return EDIT_PRICE_VALUE
-    new_price = int(text)
-    product_id = context.user_data["editing_product_id"]
-    db.update_price(product_id, new_price)
-    product = db.get_product(product_id)
     await update.message.reply_text(
-        f"✅ قیمت «{product['name']}» به {new_price:,} تومان به‌روز شد.",
-        reply_markup=kb.admin_menu_keyboard(),
+        "یک دسته‌بندی انتخاب کنید:", reply_markup=kb.categories_keyboard(prefix="cat")
     )
     return ConversationHandler.END
 
 
-# ---------- مدیریت سفارش‌ها ----------
-
-async def pending_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await admin_only_guard(update):
-        return
-    orders = db.list_all_orders(status="pending")
-    if not orders:
-        await update.message.reply_text("سفارش در انتظاری وجود نداره. 🎉")
-        return
-    for o in orders:
-        await send_order_summary(update, context, o)
-
-
-async def all_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await admin_only_guard(update):
-        return
-    orders = db.list_all_orders(limit=20)
-    if not orders:
-        await update.message.reply_text("هنوز سفارشی ثبت نشده.")
-        return
-    for o in orders:
-        await send_order_summary(update, context, o)
-
-
-async def send_order_summary(update, context, order):
-    user = db.get_user(order["user_id"])
-    status_label = ORDER_STATUSES.get(order["status"], order["status"])
-    text = (
-        f"سفارش #{order['id']}\n"
-        f"مشتری: {user['full_name'] if user else order['user_id']}\n"
-        f"مبلغ: {order['total_price']:,} تومان\n"
-        f"وضعیت: {status_label}\n"
-        f"تاریخ: {order['created_at'][:16]}"
-    )
-    await update.message.reply_text(text, reply_markup=kb.order_status_keyboard(order["id"]))
-
-
-async def set_order_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def pick_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    if not is_admin(query.from_user.id):
-        await query.edit_message_text("⛔ فقط برای ادمین.")
+    cat_id = int(query.data.split(":")[1])
+    context.user_data["current_category"] = cat_id
+    products = db.list_products(category_id=cat_id)
+    if not products:
+        await query.edit_message_text("محصولی در این دسته موجود نیست.")
         return
-    _, order_id, status_key = query.data.split(":")
-    order_id = int(order_id)
-    db.update_order_status(order_id, status_key)
-    order = db.get_order(order_id)
-    status_label = ORDER_STATUSES.get(status_key, status_key)
-    await query.edit_message_text(f"وضعیت سفارش #{order_id} به «{status_label}» تغییر کرد.")
+    await query.edit_message_text(
+        "یک محصول رو انتخاب کنید:", reply_markup=kb.products_keyboard(cat_id)
+    )
 
-    # اطلاع به مشتری
-    try:
-        await context.bot.send_message(
-            order["user_id"],
-            f"📦 وضعیت سفارش #{order_id} شما به‌روز شد:\n{status_label}",
+
+async def back_to_categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        "یک دسته‌بندی انتخاب کنید:", reply_markup=kb.categories_keyboard(prefix="cat")
+    )
+
+
+async def pick_product(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    product_id = int(query.data.split(":")[1])
+    product = db.get_product(product_id)
+    if not product:
+        await query.edit_message_text("این محصول دیگر موجود نیست.")
+        return
+    context.user_data["current_product"] = product_id
+    await query.edit_message_text(
+        f"{product['name']}\nقیمت: {product['price']:,} تومان / {product['unit']}\n\n"
+        "چه مقداری نیاز دارید؟",
+        reply_markup=kb.quantity_keyboard(product_id),
+    )
+
+
+async def pick_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _, product_id, qty = query.data.split(":")
+    await add_to_cart(update, context, int(product_id), int(qty))
+
+
+async def ask_custom_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    product_id = int(query.data.split(":")[1])
+    context.user_data["awaiting_qty_for"] = product_id
+    await query.edit_message_text("مقدار مورد نظرتون رو به عدد بفرستید:")
+    return ASK_QTY_CUSTOM
+
+
+async def receive_custom_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if not text.replace(".", "", 1).isdigit():
+        await update.message.reply_text("لطفاً فقط عدد ارسال کنید. مثال: 25")
+        return ASK_QTY_CUSTOM
+    qty = float(text)
+    product_id = context.user_data.get("awaiting_qty_for")
+    await add_to_cart(update, context, product_id, qty, is_message=True)
+    return ConversationHandler.END
+
+
+async def add_to_cart(update, context, product_id, qty, is_message=False):
+    product = db.get_product(product_id)
+    if not product:
+        msg = "این محصول دیگر موجود نیست."
+        if is_message:
+            await update.message.reply_text(msg)
+        else:
+            await update.callback_query.edit_message_text(msg)
+        return
+
+    line_total = product["price"] * qty
+    cart = context.user_data.get("cart", [])
+    cart.append(
+        {
+            "product_id": product_id,
+            "name": product["name"],
+            "unit": product["unit"],
+            "price": product["price"],
+            "qty": qty,
+            "line_total": line_total,
+        }
+    )
+    context.user_data["cart"] = cart
+
+    text = build_cart_text(cart)
+    if is_message:
+        await update.message.reply_text(text, reply_markup=kb.cart_keyboard())
+    else:
+        await update.callback_query.edit_message_text(text, reply_markup=kb.cart_keyboard())
+
+
+def build_cart_text(cart):
+    lines = ["🛒 سبد سفارش شما:\n"]
+    total = 0
+    for item in cart:
+        lines.append(
+            f"• {item['name']}: {item['qty']} {item['unit']} × {item['price']:,} = {item['line_total']:,} تومان"
         )
-    except Exception:
-        pass
+        total += item["line_total"]
+    lines.append(f"\n💵 جمع کل: {total:,} تومان")
+    return "\n".join(lines)
 
 
-def register_admin_handlers(app):
-    app.add_handler(CommandHandler("admin", admin_panel))
-    app.add_handler(MessageHandler(filters.Regex("^🔙 بازگشت به منوی کاربر$"), back_to_user_menu))
-    app.add_handler(MessageHandler(filters.Regex("^📦 سفارش‌های در انتظار$"), pending_orders))
-    app.add_handler(MessageHandler(filters.Regex("^📊 همه سفارش‌ها$"), all_orders))
-
-    app.add_handler(CallbackQueryHandler(edit_price_pick_category, pattern=r"^editcat:\d+$"))
-    app.add_handler(CallbackQueryHandler(set_order_status, pattern=r"^setstatus:\d+:\w+$"))
-
-    add_product_conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("^➕ افزودن محصول$"), add_product_start)],
-        states={
-            ADD_CAT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_product_category)],
-            ADD_PROD_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_product_name)],
-            ADD_PROD_UNIT: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_product_unit)],
-            ADD_PROD_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_product_price)],
-        },
-        fallbacks=[CommandHandler("cancel", back_to_user_menu)],
+async def add_more(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        "یک دسته‌بندی انتخاب کنید:", reply_markup=kb.categories_keyboard(prefix="cat")
     )
-    app.add_handler(add_product_conv)
 
-    edit_price_conv = ConversationHandler(
-        entry_points=[
-            MessageHandler(filters.Regex("^✏️ تغییر قیمت$"), edit_price_start),
-            CallbackQueryHandler(edit_price_pick_product, pattern=r"^editprod:\d+$"),
-        ],
-        states={
-            EDIT_PRICE_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_price_value)],
-        },
-        fallbacks=[CommandHandler("cancel", back_to_user_menu)],
+
+async def clear_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data["cart"] = []
+    await query.edit_message_text("سبد سفارش خالی شد. برای شروع دوباره /neworder رو بزنید.")
+
+
+async def checkout_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    cart = context.user_data.get("cart", [])
+    if not cart:
+        await query.edit_message_text("سبد سفارش شما خالیه.")
+        return ConversationHandler.END
+    await query.edit_message_text("لطفاً آدرس تحویل بار رو بنویسید:")
+    return ASK_ADDRESS
+
+
+async def receive_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["address"] = update.message.text
+    await update.message.reply_text(
+        "شماره تماس‌تون رو بفرستید (می‌تونید از دکمه زیر استفاده کنید):",
+        reply_markup=kb.phone_request_keyboard(),
     )
-    app.add_handler(edit_price_conv)
+    return ASK_PHONE
 
+
+async def receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.contact:
+        phone = update.message.contact.phone_number
+    else:
+        phone = update.message.text
+    context.user_data["phone"] = phone
+
+    cart = context.user_data.get("cart", [])
+    total = sum(item["line_total"] for item in cart)
+    address = context.user_data.get("address", "")
+
+    user = update.effective_user
+    db.upsert_user(user.id, user.full_name, user.username, phone=phone)
+    order_id = db.create_order(user.id, cart, total, address, phone)
+
+    from telegram import ReplyKeyboardRemove
+
+    text = (
+        f"✅ سفارش شما با شماره #{order_id} ثبت شد!\n\n"
+        f"{build_cart_text(cart)}\n\n"
+        f"📍 آدرس: {address}\n"
+        f"📱 تلفن: {phone}\n\n"
+        f"وضعیت فعلی: {ORDER_STATUSES['pending']}\n"
+        "به محض بررسی توسط کارشناسان، بهتون اطلاع می‌دیم."
+    )
+    await update.message.reply_text(text, reply_markup=kb.main_menu_keyboard())
+
+    context.user_data["cart"] = []
+
+    # اطلاع به ادمین‌ها
+    admin_text = (
+        f"🆕 سفارش جدید #{order_id}\n"
+        f"از: {user.full_name} (@{user.username or '---'})\n\n"
+        f"{build_cart_text(cart)}\n\n"
+        f"📍 آدرس: {address}\n📱 تلفن: {phone}"
+    )
+    for admin_id in ADMIN_IDS:
+        try:
+            await context.bot.send_message(
+                admin_id, admin_text, reply_markup=kb.order_status_keyboard(order_id)
+            )
+        except Exception:
+            pass
+
+    return ConversationHandler.END
+
+
+async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    orders = db.list_user_orders(user.id)
+    if not orders:
+        await update.message.reply_text("شما هنوز سفارشی ثبت نکردید.")
+        return
+    lines = ["📋 سفارش‌های شما:\n"]
+    for o in orders:
+        status_label = ORDER_STATUSES.get(o["status"], o["status"])
+        lines.append(
+            f"#{o['id']} | {o['total_price']:,} تومان | {status_label} | {o['created_at'][:10]}"
+        )
+    await update.message.reply_text("\n".join(lines))
+
+
+async def support(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "برای پشتیبانی می‌تونید با شماره زیر تماس بگیرید:\n📞 021-XXXXXXX"
+    )
+
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["cart"] = []
+    await update.message.reply_text("عملیات لغو شد.", reply_markup=kb.main_menu_keyboard())
+    return ConversationHandler.END
+
+
+def register_user_handlers(app):
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.Regex("^💰 مشاهده قیمت‌ها$"), show_prices))
+    app.add_handler(MessageHandler(filters.Regex("^📋 سفارش‌های من$"), my_orders))
+    app.add_handler(MessageHandler(filters.Regex("^📞 تماس با پشتیبانی$"), support))
+    app.add_handler(MessageHandler(filters.Regex("^🛒 ثبت سفارش جدید$"), new_order_start))
+    app.add_handler(CommandHandler("neworder", new_order_start))
+
+    app.add_handler(CallbackQueryHandler(pick_category, pattern=r"^cat:\d+$"))
+    app.add_handler(CallbackQueryHandler(back_to_categories, pattern=r"^back_to_categories$"))
+    app.add_handler(CallbackQueryHandler(pick_product, pattern=r"^prod:\d+$"))
+    app.add_handler(CallbackQueryHandler(pick_quantity, pattern=r"^qty:\d+:\d+(\.\d+)?$"))
+    app.add_handler(CallbackQueryHandler(add_more, pattern=r"^add_more$"))
+    app.add_handler(CallbackQueryHandler(clear_cart, pattern=r"^clear_cart$"))
+    app.add_handler(CallbackQueryHandler(show_prices_for_category, pattern=r"^pricecat:\d+$"))
+
+    custom_qty_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(ask_custom_quantity, pattern=r"^qtycustom:\d+$")],
+        states={
+            ASK_QTY_CUSTOM: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_custom_quantity)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+    app.add_handler(custom_qty_conv)
+
+    checkout_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(checkout_start, pattern=r"^checkout$")],
+        states={
+            ASK_ADDRESS: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_address)],
+            ASK_PHONE: [MessageHandler((filters.TEXT | filters.CONTACT) & ~filters.COMMAND, receive_phone)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+    app.add_handler(checkout_conv)
