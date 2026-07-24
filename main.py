@@ -15,7 +15,8 @@ logging.basicConfig(
 def main():
     init_db()
 
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app = ApplicationBuilder().token(BOT_TOKEN).job_queue(None).build()
+
 
     register_user_handlers(app)
     register_admin_handlers(app)
