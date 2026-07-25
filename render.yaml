@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: steel-bot
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: WEBHOOK_URL
+        sync: false
+      - key: ADMIN_IDS
+        sync: false
+      - key: RECEIPT_ACCOUNT_HOLDER
+        sync: false
+      - key: RECEIPT_CARD_LAST4
+        sync: false
+      - key: MAX_RECEIPT_SIZE_MB
+        value: "8"
+      - key: OCR_LANG
+        value: fas+eng
+      - key: OCR_TIMEOUT_SECONDS
+        value: "25"
