@@ -6,7 +6,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "REPLACE_WITH_YOUR_BOT_TOKEN")
 
 # آیدی عددی تلگرام ادمین‌ها (می‌توانید با ربات @userinfobot آیدی خودتان را بگیرید)
 ADMIN_IDS = [
-    123456789,  # <-- این را با آیدی تلگرام خودتان جایگزین کنید
+    178064560,  # <-- این را با آیدی تلگرام خودتان جایگزین کنید
 ]
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "steel_bot.db")
