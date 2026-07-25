@@ -10,7 +10,7 @@ from telegram.ext import (
 
 import database as db
 import keyboards as kb
-from config import ORDER_STATUSES, ADMIN_IDS
+from config import ORDER_STATUSES, ADMIN_IDS, CONTACT_INFO
 
 # مراحل مکالمه
 ASK_QTY_CUSTOM, ASK_ADDRESS, ASK_PHONE, CONFIRM = range(4)
@@ -271,9 +271,7 @@ async def my_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def support(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "برای پشتیبانی می‌تونید با شماره زیر تماس بگیرید:\n📞 021-XXXXXXX"
-    )
+    await update.message.reply_text(CONTACT_INFO)
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -286,7 +284,7 @@ def register_user_handlers(app):
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.Regex("^💰 مشاهده قیمت‌ها$"), show_prices))
     app.add_handler(MessageHandler(filters.Regex("^📋 سفارش‌های من$"), my_orders))
-    app.add_handler(MessageHandler(filters.Regex("^📞 تماس با پشتیبانی$"), support))
+    app.add_handler(MessageHandler(filters.Regex("^📞 اطلاعات تماس$"), support))
     app.add_handler(MessageHandler(filters.Regex("^🛒 ثبت سفارش جدید$"), new_order_start))
     app.add_handler(CommandHandler("neworder", new_order_start))
 
