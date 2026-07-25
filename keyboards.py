@@ -7,10 +7,9 @@ from config import ORDER_STATUSES
 def main_menu_keyboard():
     return ReplyKeyboardMarkup(
         [
-          ["📋 سفارش‌های من", "📞 اطلاعات تماس"],
-            ["➕ افزودن محصول", "✏️ تغییر قیمت"],
-            ["📥 وارد کردن از اکسل", "📤 خروجی اکسل"],
-            ["📦 سفارش‌های در انتظار", "📊 همه سفارش‌ها"],
+            ["🛒 ثبت سفارش جدید", "💰 مشاهده قیمت‌ها"],
+            ["📋 سفارش‌های من", "🧾 ارسال فیش واریزی"],
+            ["📞 اطلاعات تماس"],
         ],
         resize_keyboard=True,
     )
@@ -20,6 +19,7 @@ def admin_menu_keyboard():
     return ReplyKeyboardMarkup(
         [
             ["➕ افزودن محصول", "✏️ تغییر قیمت"],
+            ["📥 وارد کردن از اکسل", "📤 خروجی اکسل"],
             ["📦 سفارش‌های در انتظار", "📊 همه سفارش‌ها"],
             ["🔙 بازگشت به منوی کاربر"],
         ],
@@ -82,3 +82,23 @@ def order_status_keyboard(order_id):
     if row:
         buttons.append(row)
     return InlineKeyboardMarkup(buttons)
+
+
+def receipt_order_keyboard(orders):
+    buttons = [
+        [InlineKeyboardButton(
+            f"سفارش #{o['id']} — {o['total_price']:,} تومان",
+            callback_data=f"receiptorder:{o['id']}"
+        )]
+        for o in orders
+    ]
+    return InlineKeyboardMarkup(buttons)
+
+
+def receipt_review_keyboard(receipt_id):
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ تأیید پرداخت", callback_data=f"receiptapprove:{receipt_id}"),
+            InlineKeyboardButton("❌ رد فیش", callback_data=f"receiptreject:{receipt_id}"),
+        ]
+    ])

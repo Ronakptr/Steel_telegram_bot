@@ -58,6 +58,28 @@ def init_db():
                 updated_at TEXT,
                 FOREIGN KEY (user_id) REFERENCES users(user_id)
             );
+
+            CREATE TABLE IF NOT EXISTS payment_receipts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                telegram_file_id TEXT NOT NULL,
+                file_hash TEXT NOT NULL,
+                mime_type TEXT,
+                status TEXT NOT NULL DEFAULT 'pending_review',
+                ai_result_json TEXT,
+                amount_detected INTEGER,
+                tracking_number TEXT,
+                admin_id INTEGER,
+                admin_note TEXT,
+                created_at TEXT NOT NULL,
+                reviewed_at TEXT,
+                FOREIGN KEY (order_id) REFERENCES orders(id),
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_receipts_order_id ON payment_receipts(order_id);
+            CREATE INDEX IF NOT EXISTS idx_receipts_file_hash ON payment_receipts(file_hash);
             """
         )
 
@@ -227,3 +249,68 @@ def update_order_status(order_id, status):
             "UPDATE orders SET status=?, updated_at=? WHERE id=?",
             (status, datetime.now().isoformat(), order_id),
         )
+
+
+# ---------- فیش‌های واریزی ----------
+
+def list_unpaid_user_orders(user_id, limit=20):
+    with get_conn() as conn:
+        return conn.execute(
+            """
+            SELECT o.* FROM orders o
+            WHERE o.user_id=?
+              AND o.status != 'cancelled'
+              AND NOT EXISTS (
+                  SELECT 1 FROM payment_receipts r
+                  WHERE r.order_id=o.id AND r.status='approved'
+              )
+            ORDER BY o.id DESC LIMIT ?
+            """,
+            (user_id, limit),
+        ).fetchall()
+
+
+def create_payment_receipt(order_id, user_id, telegram_file_id, file_hash, mime_type, ai_result):
+    with get_conn() as conn:
+        cur = conn.execute(
+            """INSERT INTO payment_receipts
+            (order_id, user_id, telegram_file_id, file_hash, mime_type, status,
+             ai_result_json, amount_detected, tracking_number, created_at)
+            VALUES (?, ?, ?, ?, ?, 'pending_review', ?, ?, ?, ?)""",
+            (
+                order_id, user_id, telegram_file_id, file_hash, mime_type,
+                json.dumps(ai_result, ensure_ascii=False), ai_result.get('amount'),
+                ai_result.get('tracking_number'), datetime.now().isoformat(),
+            ),
+        )
+        return cur.lastrowid
+
+
+def get_payment_receipt(receipt_id):
+    with get_conn() as conn:
+        return conn.execute("SELECT * FROM payment_receipts WHERE id=?", (receipt_id,)).fetchone()
+
+
+def find_receipt_by_hash(file_hash):
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM payment_receipts WHERE file_hash=? ORDER BY id DESC LIMIT 1",
+            (file_hash,),
+        ).fetchone()
+
+
+def update_receipt_status(receipt_id, status, admin_id=None, admin_note=None):
+    with get_conn() as conn:
+        conn.execute(
+            """UPDATE payment_receipts SET status=?, admin_id=?, admin_note=?, reviewed_at=?
+               WHERE id=?""",
+            (status, admin_id, admin_note, datetime.now().isoformat(), receipt_id),
+        )
+
+
+def get_latest_order_receipt(order_id):
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM payment_receipts WHERE order_id=? ORDER BY id DESC LIMIT 1",
+            (order_id,),
+        ).fetchone()

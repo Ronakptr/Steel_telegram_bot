@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.env
+steel_bot.db
+*.db-journal
+.vscode/
+.idea/
