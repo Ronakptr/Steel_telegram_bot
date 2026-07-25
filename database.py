@@ -107,7 +107,12 @@ def list_products(category_id=None, active_only=True):
             q += " AND is_active=1"
         q += " ORDER BY name"
         return conn.execute(q, params).fetchall()
-
+        
+def get_product_by_name(category_id, name):
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT * FROM products WHERE category_id=? AND name=?", (category_id, name)
+        ).fetchone()
 
 def get_product(product_id):
     with get_conn() as conn:
