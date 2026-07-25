@@ -1,3 +1,5 @@
+import io
+
 from telegram import Update
 from telegram.ext import (
     ContextTypes,
@@ -7,6 +9,7 @@ from telegram.ext import (
     CommandHandler,
     filters,
 )
+from openpyxl import Workbook, load_workbook
 
 import database as db
 import keyboards as kb
@@ -16,6 +19,8 @@ from config import ADMIN_IDS, ORDER_STATUSES
 ADD_CAT_NAME, ADD_PROD_CAT, ADD_PROD_NAME, ADD_PROD_UNIT, ADD_PROD_PRICE = range(5)
 # مراحل تغییر قیمت
 EDIT_PRICE_PICK, EDIT_PRICE_VALUE = range(5, 7)
+# مرحله ایمپورت اکسل
+AWAIT_EXCEL_FILE = 7
 
 
 def is_admin(user_id):
@@ -160,6 +165,104 @@ async def edit_price_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+# ---------- ورود/خروج اکسل ----------
+
+async def import_excel_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await admin_only_guard(update):
+        return ConversationHandler.END
+    await update.message.reply_text(
+        "یه فایل اکسل (.xlsx) بفرستید با این ستون‌ها در سطر اول:\n\n"
+        "دسته‌بندی | نام محصول | واحد | قیمت\n\n"
+        "مثال:\n"
+        "میلگرد | میلگرد ۱۴ آجدار | کیلوگرم | 285000\n\n"
+        "اگه محصولی از قبل با همین نام و دسته وجود داشته باشه، فقط قیمتش آپدیت می‌شه. "
+        "برای لغو /cancel رو بزنید."
+    )
+    return AWAIT_EXCEL_FILE
+
+
+async def import_excel_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    document = update.message.document
+    if not document or not document.file_name.lower().endswith((".xlsx", ".xlsm")):
+        await update.message.reply_text("لطفاً یه فایل اکسل معتبر (.xlsx) بفرستید.")
+        return AWAIT_EXCEL_FILE
+
+    file = await context.bot.get_file(document.file_id)
+    file_bytes = await file.download_as_bytearray()
+
+    try:
+        wb = load_workbook(io.BytesIO(bytes(file_bytes)))
+        sheet = wb.active
+    except Exception:
+        await update.message.reply_text("نتونستم فایل رو باز کنم. مطمئن شید فرمتش .xlsx باشه.")
+        return AWAIT_EXCEL_FILE
+
+    added, updated, skipped = 0, 0, 0
+    rows = list(sheet.iter_rows(min_row=2, values_only=True))
+    for row in rows:
+        if not row or len(row) < 4:
+            skipped += 1
+            continue
+        cat_name, prod_name, unit, price = row[0], row[1], row[2], row[3]
+        if not cat_name or not prod_name or not unit or price is None:
+            skipped += 1
+            continue
+        try:
+            price_int = int(float(str(price).replace(",", "")))
+        except (ValueError, TypeError):
+            skipped += 1
+            continue
+
+        cat_name = str(cat_name).strip()
+        prod_name = str(prod_name).strip()
+        unit = str(unit).strip()
+
+        cat_id = db.add_category(cat_name)
+        if cat_id is None:
+            cats = {c["name"]: c["id"] for c in db.list_categories()}
+            cat_id = cats.get(cat_name)
+
+        existing = db.get_product_by_name(cat_id, prod_name)
+        if existing:
+            db.update_price(existing["id"], price_int)
+            updated += 1
+        else:
+            db.add_product(cat_id, prod_name, unit, price_int)
+            added += 1
+
+    await update.message.reply_text(
+        f"✅ ایمپورت تموم شد:\n"
+        f"➕ {added} محصول جدید اضافه شد\n"
+        f"✏️ {updated} محصول به‌روزرسانی شد\n"
+        f"⏭️ {skipped} سطر نامعتبر رد شد",
+        reply_markup=kb.admin_menu_keyboard(),
+    )
+    return ConversationHandler.END
+
+
+async def export_excel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await admin_only_guard(update):
+        return
+    cats = {c["id"]: c["name"] for c in db.list_categories()}
+    products = db.list_products(active_only=False)
+    if not products:
+        await update.message.reply_text("هنوز محصولی ثبت نشده.")
+        return
+
+    wb = Workbook()
+    sheet = wb.active
+    sheet.append(["دسته‌بندی", "نام محصول", "واحد", "قیمت"])
+    for p in products:
+        sheet.append([cats.get(p["category_id"], ""), p["name"], p["unit"], p["price"]])
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    await update.message.reply_document(
+        document=buffer, filename="محصولات.xlsx", caption="لیست فعلی محصولات"
+    )
+
+
 # ---------- مدیریت سفارش‌ها ----------
 
 async def pending_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -228,6 +331,17 @@ def register_admin_handlers(app):
 
     app.add_handler(CallbackQueryHandler(edit_price_pick_category, pattern=r"^editcat:\d+$"))
     app.add_handler(CallbackQueryHandler(set_order_status, pattern=r"^setstatus:\d+:\w+$"))
+
+    app.add_handler(MessageHandler(filters.Regex("^📤 خروجی اکسل$"), export_excel))
+
+    import_excel_conv = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex("^📥 وارد کردن از اکسل$"), import_excel_start)],
+        states={
+            AWAIT_EXCEL_FILE: [MessageHandler(filters.Document.ALL, import_excel_receive)],
+        },
+        fallbacks=[CommandHandler("cancel", back_to_user_menu)],
+    )
+    app.add_handler(import_excel_conv)
 
     add_product_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^➕ افزودن محصول$"), add_product_start)],
