@@ -1,16 +1,28 @@
-import sqlite3
 import json
-from datetime import datetime
+import os
+import sqlite3
 from contextlib import contextmanager
+from datetime import datetime
 
 from config import DB_PATH
 
 
+def _clean_text(value):
+    """متن ورودی را برای ذخیره و مقایسه یکدست می‌کند."""
+    if value is None:
+        return ""
+    text = str(value).replace("ي", "ی").replace("ك", "ک")
+    return " ".join(text.strip().split())
+
+
 @contextmanager
 def get_conn():
-    conn = sqlite3.connect(DB_PATH)
+    db_dir = os.path.dirname(os.path.abspath(DB_PATH))
+    os.makedirs(db_dir, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 30000")
     try:
         yield conn
         conn.commit()
@@ -78,6 +90,8 @@ def init_db():
                 FOREIGN KEY (user_id) REFERENCES users(user_id)
             );
 
+            CREATE INDEX IF NOT EXISTS idx_products_category_id ON products(category_id);
+            CREATE INDEX IF NOT EXISTS idx_products_active ON products(is_active);
             CREATE INDEX IF NOT EXISTS idx_receipts_order_id ON payment_receipts(order_id);
             CREATE INDEX IF NOT EXISTS idx_receipts_file_hash ON payment_receipts(file_hash);
             """
@@ -87,15 +101,37 @@ def init_db():
 # ---------- دسته‌بندی‌ها ----------
 
 def add_category(name):
+    """دسته را ایجاد می‌کند و همیشه شناسه واقعی آن را برمی‌گرداند.
+
+    در نسخه قبلی، INSERT OR IGNORE برای دسته تکراری ممکن بود شناسه 0 برگرداند؛
+    همین مسئله باعث توقف ورود اکسل بعد از اولین محصول یک دسته می‌شد.
+    """
+    name = _clean_text(name)
+    if not name:
+        raise ValueError("نام دسته‌بندی خالی است.")
+
     with get_conn() as conn:
-        cur = conn.execute(
-            "INSERT OR IGNORE INTO categories (name) VALUES (?)", (name,)
-        )
-        return cur.lastrowid
+        conn.execute("INSERT OR IGNORE INTO categories (name) VALUES (?)", (name,))
+        row = conn.execute(
+            "SELECT id FROM categories WHERE name=? COLLATE NOCASE LIMIT 1", (name,)
+        ).fetchone()
+        if not row:
+            raise RuntimeError("شناسه دسته‌بندی ساخته یا پیدا نشد.")
+        return row["id"]
 
 
-def list_categories():
+def list_categories(active_products_only=False):
     with get_conn() as conn:
+        if active_products_only:
+            return conn.execute(
+                """
+                SELECT DISTINCT c.*
+                FROM categories c
+                JOIN products p ON p.category_id=c.id
+                WHERE p.is_active=1
+                ORDER BY c.name
+                """
+            ).fetchall()
         return conn.execute("SELECT * FROM categories ORDER BY name").fetchall()
 
 
@@ -108,12 +144,24 @@ def get_category(cat_id):
 
 # ---------- محصولات ----------
 
-def add_product(category_id, name, unit, price):
+def add_product(category_id, name, unit, price, is_active=True):
+    name = _clean_text(name)
+    unit = _clean_text(unit)
+    if not name or not unit:
+        raise ValueError("نام محصول و واحد نباید خالی باشند.")
+
     with get_conn() as conn:
         cur = conn.execute(
-            "INSERT INTO products (category_id, name, unit, price, updated_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (category_id, name, unit, price, datetime.now().isoformat()),
+            "INSERT INTO products (category_id, name, unit, price, is_active, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                category_id,
+                name,
+                unit,
+                int(price),
+                1 if is_active else 0,
+                datetime.now().isoformat(),
+            ),
         )
         return cur.lastrowid
 
@@ -127,14 +175,22 @@ def list_products(category_id=None, active_only=True):
             params.append(category_id)
         if active_only:
             q += " AND is_active=1"
-        q += " ORDER BY name"
+        q += " ORDER BY name, id"
         return conn.execute(q, params).fetchall()
-        
+
+
 def get_product_by_name(category_id, name):
+    name = _clean_text(name)
     with get_conn() as conn:
         return conn.execute(
-            "SELECT * FROM products WHERE category_id=? AND name=?", (category_id, name)
+            """
+            SELECT * FROM products
+            WHERE category_id=? AND TRIM(name)=? COLLATE NOCASE
+            ORDER BY id LIMIT 1
+            """,
+            (category_id, name),
         ).fetchone()
+
 
 def get_product(product_id):
     with get_conn() as conn:
@@ -143,25 +199,128 @@ def get_product(product_id):
         ).fetchone()
 
 
+def update_product(product_id, category_id, name, unit, price):
+    name = _clean_text(name)
+    unit = _clean_text(unit)
+    if not name or not unit:
+        raise ValueError("نام محصول و واحد نباید خالی باشند.")
+
+    with get_conn() as conn:
+        cur = conn.execute(
+            """
+            UPDATE products
+            SET category_id=?, name=?, unit=?, price=?, updated_at=?
+            WHERE id=?
+            """,
+            (
+                int(category_id),
+                name,
+                unit,
+                int(price),
+                datetime.now().isoformat(),
+                int(product_id),
+            ),
+        )
+        return cur.rowcount > 0
+
+
 def update_price(product_id, new_price):
     with get_conn() as conn:
         conn.execute(
             "UPDATE products SET price=?, updated_at=? WHERE id=?",
-            (new_price, datetime.now().isoformat(), product_id),
+            (int(new_price), datetime.now().isoformat(), product_id),
         )
 
 
 def set_product_active(product_id, active: bool):
     with get_conn() as conn:
-        conn.execute(
-            "UPDATE products SET is_active=? WHERE id=?",
-            (1 if active else 0, product_id),
+        cur = conn.execute(
+            "UPDATE products SET is_active=?, updated_at=? WHERE id=?",
+            (1 if active else 0, datetime.now().isoformat(), product_id),
         )
+        return cur.rowcount > 0
 
 
 def delete_product(product_id):
     with get_conn() as conn:
-        conn.execute("DELETE FROM products WHERE id=?", (product_id,))
+        cur = conn.execute("DELETE FROM products WHERE id=?", (product_id,))
+        return cur.rowcount > 0
+
+
+def upsert_product(category_name, product_name, unit, price, is_active=None):
+    """محصول اکسل را در یک تراکنش اضافه یا به‌روزرسانی می‌کند."""
+    category_name = _clean_text(category_name)
+    product_name = _clean_text(product_name)
+    unit = _clean_text(unit)
+    if not category_name or not product_name or not unit:
+        raise ValueError("دسته‌بندی، نام محصول و واحد الزامی هستند.")
+
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO categories (name) VALUES (?)", (category_name,)
+        )
+        category = conn.execute(
+            "SELECT id FROM categories WHERE name=? COLLATE NOCASE LIMIT 1",
+            (category_name,),
+        ).fetchone()
+        if not category:
+            raise RuntimeError("دسته‌بندی پیدا نشد.")
+        category_id = category["id"]
+
+        existing = conn.execute(
+            """
+            SELECT id FROM products
+            WHERE category_id=? AND TRIM(name)=? COLLATE NOCASE
+            ORDER BY id LIMIT 1
+            """,
+            (category_id, product_name),
+        ).fetchone()
+        now = datetime.now().isoformat()
+
+        if existing:
+            if is_active is None:
+                conn.execute(
+                    """
+                    UPDATE products
+                    SET name=?, unit=?, price=?, updated_at=?
+                    WHERE id=?
+                    """,
+                    (product_name, unit, int(price), now, existing["id"]),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE products
+                    SET name=?, unit=?, price=?, is_active=?, updated_at=?
+                    WHERE id=?
+                    """,
+                    (
+                        product_name,
+                        unit,
+                        int(price),
+                        1 if is_active else 0,
+                        now,
+                        existing["id"],
+                    ),
+                )
+            return "updated", existing["id"]
+
+        cur = conn.execute(
+            """
+            INSERT INTO products
+            (category_id, name, unit, price, is_active, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                category_id,
+                product_name,
+                unit,
+                int(price),
+                1 if is_active is not False else 0,
+                now,
+            ),
+        )
+        return "added", cur.lastrowid
 
 
 # ---------- کاربران ----------
@@ -278,9 +437,15 @@ def create_payment_receipt(order_id, user_id, telegram_file_id, file_hash, mime_
              ai_result_json, amount_detected, tracking_number, created_at)
             VALUES (?, ?, ?, ?, ?, 'pending_review', ?, ?, ?, ?)""",
             (
-                order_id, user_id, telegram_file_id, file_hash, mime_type,
-                json.dumps(ai_result, ensure_ascii=False), ai_result.get('amount'),
-                ai_result.get('tracking_number'), datetime.now().isoformat(),
+                order_id,
+                user_id,
+                telegram_file_id,
+                file_hash,
+                mime_type,
+                json.dumps(ai_result, ensure_ascii=False),
+                ai_result.get("amount"),
+                ai_result.get("tracking_number"),
+                datetime.now().isoformat(),
             ),
         )
         return cur.lastrowid
@@ -288,7 +453,9 @@ def create_payment_receipt(order_id, user_id, telegram_file_id, file_hash, mime_
 
 def get_payment_receipt(receipt_id):
     with get_conn() as conn:
-        return conn.execute("SELECT * FROM payment_receipts WHERE id=?", (receipt_id,)).fetchone()
+        return conn.execute(
+            "SELECT * FROM payment_receipts WHERE id=?", (receipt_id,)
+        ).fetchone()
 
 
 def find_receipt_by_hash(file_hash):
